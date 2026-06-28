@@ -1,0 +1,22 @@
+
+# secrets — never commit
+service-account.json
+*.json.key
+.env
+
+# build output
+bin/
+.aws-sam/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+samconfig.toml
+temp/
+CLAUDE.md

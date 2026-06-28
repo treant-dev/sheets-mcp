@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sheets-mcp — the MCP server on Lambda behind a throttled API Gateway,
+  served at POST / (root), protected by an OAuth AS + Lambda Authorizer.
+
+Parameters:
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ACM cert ARN (eu-central-1) for the custom domain. Empty = no custom domain
+      (serve only via the raw execute-api URL).
+  CustomDomainName:
+    Type: String
+    Default: ""
+    Description: Custom domain, e.g. sheets-mcp.treant.dev. Empty = no custom domain.
+  KmsRefreshTokenKeyArn:
+    Type: String
+    Default: ""
+    Description: >-
+      CMK ARN that wraps the per-user Google refresh token. Created & managed
+      outside this stack — referenced here only for the kms:Encrypt (OAuth Lambda)
+      / kms:Decrypt (MCP Lambda) grants. Passed at deploy via .env (see Makefile).
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+      - arm64   # Graviton: cheaper, and builds natively on Apple Silicon
+
+Resources:
+
+  # ── MCP Lambda ──────────────────────────────────────────────────
+  McpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: app/
+      Handler: handler.lambda_handler
+      # NOTE: no ReservedConcurrentExecutions — a new account's total Lambda
+      # concurrency is only 10, and AWS won't let unreserved drop below 10, so
+      # reserving any is rejected. API Gateway throttling (below) is the primary
+      # cost guard. Revisit once the account concurrency limit is raised.
+      Environment:
+        Variables:
+          # Non-secret config only. Google client_id/secret are SSM params under
+          # SSM_PREFIX, read at cold start (app/secret_store.py).
+          SSM_PREFIX: /sheets-mcp
+          SHEETS_MCP_USERS_TABLE: !Ref UsersTable   # per-user refresh tokens (Phase 3)
+          KMS_KEY_ID: !Ref KmsRefreshTokenKeyArn    # decrypt the stored refresh token
+          LOG_LEVEL: INFO
+      Policies:
+        # Read the Google client_id/secret + JWT signing key from SSM.
+        - SSMParameterReadPolicy:
+            ParameterName: sheets-mcp/*
+        # Look up the caller's stored Google refresh token, then decrypt it (CMK).
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Ref KmsRefreshTokenKeyArn
+      Events:
+        Mcp:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /
+            Method: post
+            Auth:
+              Authorizer: McpAuthorizer   # only the MCP route (POST /) is protected (OAuth routes stay public)
+
+  # ── Lambda Authorizer for /mcp (Step C4) ────────────────────────
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: app/
+      Handler: authorizer.lambda_handler
+      Environment:
+        Variables:
+          SSM_PREFIX: /sheets-mcp        # reads the JWT signing key to verify tokens
+          PUBLIC_BASE_URL: !If [HasCustomDomain, !Sub "https://${CustomDomainName}", ""]
+          LOG_LEVEL: INFO
+      Policies:
+        - SSMParameterReadPolicy:
+            ParameterName: sheets-mcp/*
+
+  # ── OAuth AS Lambda (Step C) ────────────────────────────────────
+  # Separate from the MCP function so /mcp stays lean and the auth concerns are
+  # isolated. Dispatches discovery, DCR, /authorize, /token internally.
+  OAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: app/
+      Handler: oauth.lambda_handler
+      Environment:
+        Variables:
+          SSM_PREFIX: /sheets-mcp                       # JWT signing key + Google client creds
+          PUBLIC_BASE_URL: !If [HasCustomDomain, !Sub "https://${CustomDomainName}", ""]
+          KMS_KEY_ID: !Ref KmsRefreshTokenKeyArn        # encrypt the Google refresh token
+          SHEETS_MCP_USERS_TABLE: !Ref UsersTable
+          SHEETS_MCP_OAUTH_CLIENTS_TABLE: !Ref OAuthClientsTable
+          SHEETS_MCP_AUTH_CODES_TABLE: !Ref AuthCodesTable
+          SHEETS_MCP_REFRESH_TOKENS_TABLE: !Ref RefreshTokensTable
+          LOG_LEVEL: INFO
+      Policies:
+        - SSMParameterReadPolicy:
+            ParameterName: sheets-mcp/*
+        - Statement:
+            - Effect: Allow
+              Action: kms:Encrypt
+              Resource: !Ref KmsRefreshTokenKeyArn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OAuthClientsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuthCodesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RefreshTokensTable
+      Events:
+        AsMetadata:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /.well-known/oauth-authorization-server
+            Method: get
+        PrMetadata:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /.well-known/oauth-protected-resource
+            Method: get
+        Register:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /register
+            Method: post
+        AuthorizeGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /authorize
+            Method: get
+        GoogleCallback:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /google/callback
+            Method: get
+        Token:
+          Type: Api
+          Properties:
+            RestApiId: !Ref McpApi
+            Path: /token
+            Method: post
+
+  # ── DynamoDB tables (OAuth AS — Step C) ─────────────────────────
+  # PAY_PER_REQUEST, Retain on delete, TTL attribute named `ttl`. Idle tables
+  # cost nothing; only storage + requests bill, both negligible at this scale.
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: sheets_mcp_users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+
+  OAuthClientsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: sheets_mcp_oauth_clients
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: client_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: client_id
+          KeyType: HASH
+
+  AuthCodesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: sheets_mcp_auth_codes
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: code_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: code_hash
+          KeyType: HASH
+      TimeToLiveSpecification:   # auto-reap expired auth codes
+        AttributeName: ttl
+        Enabled: true
+
+  RefreshTokensTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: sheets_mcp_refresh_tokens
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token_hash
+          KeyType: HASH
+
+  # ── API Gateway (throttled) ─────────────────────────────────────
+  McpApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          # Cost guard: steady-state 5 req/s, burst up to 10. Blocks request floods.
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      # CORS for browser-based claude.ai web: auto-adds an OPTIONS (MOCK) preflight
+      # to every route. The actual responses set Access-Control-Allow-Origin in the
+      # Lambdas (oauth.py / handler.py) and on the 401 GatewayResponse below.
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization,Mcp-Protocol-Version,Mcp-Session-Id,Last-Event-Id'"
+        AllowMethods: "'GET,POST,OPTIONS'"
+      Auth:
+        # Defined here, attached only to the /mcp event above — no DefaultAuthorizer,
+        # so /authorize, /token, /register, /.well-known/* stay public.
+        Authorizers:
+          McpAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            FunctionPayloadType: REQUEST
+            Identity:
+              Headers:
+                - Authorization
+              ReauthorizeEvery: 0   # always validate (no authorizer-result cache)
+
+  # ── Custom domain (Step C5) — maps https://<domain>/ to the prod stage, so
+  #    there's no /prod prefix and OAuth discovery (RFC 8414) resolves at root.
+  McpDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Condition: HasCustomDomain
+    Properties:
+      DomainName: !Ref CustomDomainName
+      RegionalCertificateArn: !Ref CertificateArn
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      SecurityPolicy: TLS_1_2
+
+  McpBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: HasCustomDomain
+    DependsOn: McpApiprodStage   # the stage must exist before mapping the root path to it
+    Properties:
+      DomainName: !Ref McpDomainName
+      RestApiId: !Ref McpApi
+      Stage: prod
+
+  # 401 (UNAUTHORIZED) responses carry WWW-Authenticate pointing at the
+  # protected-resource metadata — THE trigger that makes Claude start OAuth.
+  # Standalone resource (not inside McpApi) to avoid a self-referential cycle.
+  McpUnauthorizedResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref McpApi
+      ResponseType: UNAUTHORIZED
+      StatusCode: "401"
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.WWW-Authenticate: !If
+          - HasCustomDomain
+          - !Sub "'Bearer resource_metadata=\"https://${CustomDomainName}/.well-known/oauth-protected-resource\"'"
+          - !Sub "'Bearer resource_metadata=\"https://${McpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/.well-known/oauth-protected-resource\"'"
+
+Outputs:
+  McpUrl:
+    Description: MCP endpoint — POST JSON-RPC here (manual HTTP MCP client for now)
+    Value: !Sub https://${McpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/
+  CustomDomainTarget:
+    Condition: HasCustomDomain
+    Description: >-
+      Point the Cloudflare CNAME (sheets-mcp.treant.dev, DNS-only / grey cloud) at THIS target.
+    Value: !GetAtt McpDomainName.RegionalDomainName
+  CustomDomainMcpUrl:
+    Condition: HasCustomDomain
+    Description: The connector URL once DNS resolves.
+    Value: !Sub https://${CustomDomainName}/

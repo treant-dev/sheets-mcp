@@ -1,0 +1,9 @@
+# Lambda runtime dependencies — installed into the deployment package by `sam build`.
+# Keep in sync with the runtime deps in ../requirements.txt.
+# NOT listed: `mcp` (stdio-only entry, unused on Lambda) and `boto3` (provided by
+# the Lambda runtime — though awslabs-mcp-lambda-handler pulls it transitively).
+awslabs-mcp-lambda-handler==0.1.14   # MCP-over-Lambda (serves POST /)
+PyJWT==2.13.0                        # HS256 access-token issuance/validation (OAuth AS)
+google-auth==2.55.0                  # per-user Google OAuth credentials (token refresh)
+requests==2.34.2                     # google-auth's token transport
+httpx==0.28.1                        # Sheets REST calls + Google token exchange

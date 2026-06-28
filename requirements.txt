@@ -1,0 +1,6 @@
+mcp==1.28.0                         # stdio entry (Claude Desktop / local)
+awslabs-mcp-lambda-handler==0.1.14  # MCP-over-Lambda (pulls in boto3)
+PyJWT==2.13.0                       # HS256 access-token issuance/validation
+google-auth==2.55.0
+requests==2.34.2
+httpx==0.28.1
