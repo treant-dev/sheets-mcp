@@ -1,0 +1,16 @@
+# secrets — never commit
+service-account.json
+*.json.key
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+temp/
+CLAUDE.md

@@ -1,0 +1,5 @@
+# TLS is obtained and renewed automatically from Let's Encrypt. claude.ai only
+# accepts https connectors, so this is not optional.
+sheets-mcp.treant.dev {
+	reverse_proxy app:8000
+}

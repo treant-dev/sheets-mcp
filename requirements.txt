@@ -1,0 +1,6 @@
+mcp==1.28.0          # MCP server (FastMCP, Streamable HTTP, OAuth scaffolding)
+PyJWT==2.13.0        # HS256 tokens — all OAuth state lives inside them
+google-auth==2.55.0  # service-account credentials + token refresh
+requests==2.34.2     # google-auth's token transport
+httpx==0.28.1        # Sheets/Drive REST calls + the Google token exchange
+uvicorn==0.52.3      # ASGI server (also a transitive dep of mcp)

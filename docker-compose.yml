@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    image: sheets-mcp:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Service-account key, mounted read-only. Point GOOGLE_APPLICATION_CREDENTIALS
+      # at this path in .env (or drop the mount and inline the key in
+      # GOOGLE_SERVICE_ACCOUNT_JSON instead).
+      - ./service-account.json:/secrets/service-account.json:ro
+    ports:
+      # Loopback only — the public entrance is Caddy. Handy for curl on the host.
+      - "127.0.0.1:8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"     # required for the Let's Encrypt HTTP challenge
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # issued certificates — losing this re-issues them
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
