@@ -37,15 +37,37 @@ Then share each spreadsheet you want to use with the service-account e-mail
 
 ## Deploy
 
-On the VPS, with `sheets-mcp.treant.dev` pointing at it (A record, Cloudflare set to
-DNS only) and ports 80 and 443 open:
+Every push to `main` builds the image and publishes it to
+`ghcr.io/treant-dev/sheets-mcp:latest` (see `.github/workflows/build.yml`; tests run
+first and a failure blocks the publish). The server never checks out the source — it
+pulls that image.
+
+The VPS needs four files in one directory, two of them secret:
+
+| | |
+|---|---|
+| `docker-compose.yml` | from this repo, unchanged |
+| `Caddyfile` | from this repo, unchanged |
+| `.env` | filled in from `.env.example` — **secret** |
+| `service-account.json` | the downloaded key — **secret** |
+
+With `sheets-mcp.treant.dev` pointing at the host (A record, Cloudflare set to DNS
+only) and ports 80 and 443 open:
 
 ```bash
-git clone git@github.com:treant-dev/sheets-mcp.git && cd sheets-mcp
-cp .env.example .env          # fill it in
-cp /path/to/key.json service-account.json
-docker compose up -d --build
+mkdir -p /opt/sheets-mcp && cd /opt/sheets-mcp
+# copy the four files here, then:
+docker compose up -d
 curl https://sheets-mcp.treant.dev/health
+```
+
+If the package is private, log in once first:
+`echo $GITHUB_TOKEN | docker login ghcr.io -u <user> --password-stdin`.
+
+To ship a new version, push to `main`, then on the server:
+
+```bash
+docker compose pull && docker compose up -d
 ```
 
 Caddy obtains the TLS certificate on first start; `docker compose logs caddy` shows

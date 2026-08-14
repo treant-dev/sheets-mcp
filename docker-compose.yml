@@ -1,7 +1,8 @@
 services:
   app:
-    build: .
-    image: sheets-mcp:latest
+    # Built and published by .github/workflows/build.yml on every push to main.
+    # The server only ever pulls it — no source checkout there.
+    image: ghcr.io/treant-dev/sheets-mcp:latest
     restart: unless-stopped
     env_file: .env
     volumes:
