@@ -1,5 +1,7 @@
 """Unit tests for SheetsClient — mocks the Sheets and Drive REST APIs via
 httpx.MockTransport. No credentials or network."""
+import json
+
 import httpx
 import pytest
 
@@ -13,7 +15,9 @@ def make_client(handler):
     return SheetsClient(creds=None, http=httpx.Client(transport=httpx.MockTransport(handler)))
 
 
-def test_read_range():
+def test_values_get_passes_the_api_shape_through():
+    """Responses are not re-mapped: the tools mirror Google's own MCP server,
+    which returns the REST shapes verbatim."""
     def handler(request):
         assert request.method == "GET"
         return httpx.Response(200, json={
@@ -21,85 +25,96 @@ def test_read_range():
             "values": [["Name", "Role"], ["Ada", "Eng"]],
         })
 
-    out = make_client(handler).read_range(SID, "A1:B2")
-    assert out["range"] == "Sheet1!A1:B2"
-    assert out["rows"][1][0] == "Ada"
+    out = make_client(handler).values_get(SID, "A1:B2")
+    assert out == {"range": "Sheet1!A1:B2", "values": [["Name", "Role"], ["Ada", "Eng"]]}
 
 
-def test_read_range_empty():
+def test_values_get_range_is_url_encoded():
+    captured = {}
+
     def handler(request):
-        return httpx.Response(200, json={"range": "Sheet1!A1:Z100"})  # no "values"
+        captured["path"] = request.url.raw_path.decode()   # .path is decoded again
+        return httpx.Response(200, json={})
 
-    out = make_client(handler).read_range(SID, "A1:Z100")
-    assert out["rows"] == []
+    make_client(handler).values_get(SID, "Sheet 1!A1:B2")
+    assert captured["path"].endswith("/values/Sheet%201%21A1%3AB2")
 
 
-def test_list_sheets():
+def test_spreadsheets_get_metadata_only_by_default():
+    captured = {}
+
     def handler(request):
-        return httpx.Response(200, json={
-            "properties": {"title": "test mcp"},
-            "sheets": [{"properties": {
-                "sheetId": 0, "title": "Sheet1", "index": 0,
-                "gridProperties": {"rowCount": 1000, "columnCount": 26},
-            }}],
-        })
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"properties": {"title": "test mcp"}})
 
-    out = make_client(handler).list_sheets(SID)
-    assert out["title"] == "test mcp"
-    assert out["tabs"][0] == {
-        "title": "Sheet1", "sheet_id": 0, "index": 0, "row_count": 1000, "col_count": 26,
-    }
+    out = make_client(handler).spreadsheets_get(SID)
+    assert captured["params"]["fields"] == "spreadsheetId,properties.title,sheets.properties"
+    assert "includeGridData" not in captured["params"]
+    assert out["properties"]["title"] == "test mcp"
 
 
-def test_write_range_defaults_user_entered():
+def test_spreadsheets_get_with_grid_data():
+    captured = {}
+
+    def handler(request):
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"sheets": [{"data": []}]})
+
+    make_client(handler).spreadsheets_get(SID, include_grid_data=True)
+    assert captured["params"]["includeGridData"] == "true"
+    # `fields` would restrict the response and defeat the flag
+    assert "fields" not in captured["params"]
+
+
+def test_values_update_sends_the_given_input_option():
     captured = {}
 
     def handler(request):
         captured["method"] = request.method
         captured["vio"] = request.url.params.get("valueInputOption")
-        return httpx.Response(200, json={
-            "updatedRange": "Sheet1!E1:F2", "updatedRows": 2,
-            "updatedColumns": 2, "updatedCells": 4,
-        })
+        return httpx.Response(200, json={"updatedRange": "Sheet1!E1:F2", "updatedCells": 4})
 
-    out = make_client(handler).write_range(SID, "E1:F2", [["a", "b"], ["c", "d"]])
+    out = make_client(handler).values_update(SID, "E1:F2", [["a", "b"]], "RAW")
     assert captured["method"] == "PUT"
-    assert captured["vio"] == "USER_ENTERED"  # the default
-    assert out["updated_cells"] == 4
-    assert out["updated_range"] == "Sheet1!E1:F2"
-
-
-def test_write_range_raw_honored():
-    captured = {}
-
-    def handler(request):
-        captured["vio"] = request.url.params.get("valueInputOption")
-        return httpx.Response(200, json={"updatedRange": "Sheet1!A1", "updatedCells": 1})
-
-    make_client(handler).write_range(SID, "A1", [["=1+1"]], value_input_option="RAW")
     assert captured["vio"] == "RAW"
+    assert out["updatedCells"] == 4
 
 
-def test_append_rows():
+def test_values_append():
     def handler(request):
         assert request.method == "POST"
         assert ":append" in request.url.path
-        return httpx.Response(200, json={"updates": {
-            "updatedRange": "Sheet1!E3:F3", "updatedRows": 1, "updatedCells": 2,
-        }})
+        assert request.url.params.get("insertDataOption") == "INSERT_ROWS"
+        return httpx.Response(200, json={"updates": {"updatedRange": "Sheet1!E3:F3"}})
 
-    out = make_client(handler).append_rows(SID, "E1:F2", [["x", "y"]])
-    assert out == {"updated_range": "Sheet1!E3:F3", "updated_rows": 1, "updated_cells": 2}
+    out = make_client(handler).values_append(SID, "E1:F2", [["x", "y"]])
+    assert out["updates"]["updatedRange"] == "Sheet1!E3:F3"
 
 
-def test_clear_range():
+def test_values_clear():
     def handler(request):
         assert request.method == "POST"
         assert ":clear" in request.url.path
         return httpx.Response(200, json={"clearedRange": "Sheet1!E1:F10"})
 
-    out = make_client(handler).clear_range(SID, "E1:F10")
-    assert out["cleared_range"] == "Sheet1!E1:F10"
+    assert make_client(handler).values_clear(SID, "E1:F10")["clearedRange"] == "Sheet1!E1:F10"
+
+
+def test_batch_update():
+    captured = {}
+
+    def handler(request):
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"replies": [{"addSheet": {"properties": {"sheetId": 7}}}]})
+
+    reqs = [{"addSheet": {"properties": {"title": "New"}}}]
+    out = make_client(handler).batch_update(SID, reqs)
+    assert captured["method"] == "POST"
+    assert captured["path"].endswith(f"/{SID}:batchUpdate")
+    assert captured["body"] == {"requests": reqs}
+    assert out["replies"][0]["addSheet"]["properties"]["sheetId"] == 7
 
 
 # ── Drive: the user ↔ spreadsheets link ─────────────────────────────

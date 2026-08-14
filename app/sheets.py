@@ -1,5 +1,9 @@
 """Google Sheets and Drive access, authed as a service account.
 
+The Sheets methods are thin wrappers that return the REST API's own response
+shapes, because the tools built on them mirror Google's official Sheets MCP
+server (https://developers.google.com/workspace/sheets/api/reference/mcp).
+
 One set of credentials for the whole server: users share their spreadsheets with
 the service account's e-mail address, and every API call is made as that account.
 Nothing per-user is stored — Drive already knows who owns each file, which is what
@@ -53,75 +57,66 @@ class SheetsClient:
     def _values_url(self, spreadsheet_id, a1_range):
         return f"{self._base}/{spreadsheet_id}/values/{quote(a1_range, safe='')}"
 
-    def read_range(self, spreadsheet_id, a1_range):
+    # Responses are passed through as the API returns them (ValueRange,
+    # UpdateValuesResponse, Spreadsheet …). The tools mirror Google's own Sheets
+    # MCP server, whose output is the raw REST shape, so re-mapping fields here
+    # would only make our answers differ from what a model expects.
+    def values_get(self, spreadsheet_id, a1_range):
         r = self._http.get(self._values_url(spreadsheet_id, a1_range), headers=self._hdr())
         r.raise_for_status()
-        d = r.json()
-        return {"range": d.get("range", a1_range), "rows": d.get("values", [])}
+        return r.json()
 
-    def write_range(self, spreadsheet_id, a1_range, values, value_input_option="USER_ENTERED"):
+    def values_update(self, spreadsheet_id, a1_range, values, value_input_option):
         r = self._http.put(
             self._values_url(spreadsheet_id, a1_range),
             headers=self._hdr(),
-            params={"valueInputOption": value_input_option or "USER_ENTERED"},
+            params={"valueInputOption": value_input_option},
             json={"values": values},
         )
         r.raise_for_status()
-        d = r.json()
-        return {
-            "updated_range": d.get("updatedRange"),
-            "updated_rows": d.get("updatedRows", 0),
-            "updated_columns": d.get("updatedColumns", 0),
-            "updated_cells": d.get("updatedCells", 0),
-        }
+        return r.json()
 
-    def append_rows(self, spreadsheet_id, a1_range, values, value_input_option="USER_ENTERED"):
+    def values_append(self, spreadsheet_id, a1_range, values, value_input_option="USER_ENTERED"):
         r = self._http.post(
             self._values_url(spreadsheet_id, a1_range) + ":append",
             headers=self._hdr(),
             params={
-                "valueInputOption": value_input_option or "USER_ENTERED",
+                "valueInputOption": value_input_option,
                 "insertDataOption": "INSERT_ROWS",
             },
             json={"values": values},
         )
         r.raise_for_status()
-        up = r.json().get("updates", {})
-        return {
-            "updated_range": up.get("updatedRange"),
-            "updated_rows": up.get("updatedRows", 0),
-            "updated_cells": up.get("updatedCells", 0),
-        }
+        return r.json()
 
-    def clear_range(self, spreadsheet_id, a1_range):
+    def values_clear(self, spreadsheet_id, a1_range):
         r = self._http.post(
             self._values_url(spreadsheet_id, a1_range) + ":clear",
             headers=self._hdr(),
             json={},
         )
         r.raise_for_status()
-        return {"cleared_range": r.json().get("clearedRange")}
+        return r.json()
 
-    def list_sheets(self, spreadsheet_id):
-        r = self._http.get(
-            f"{self._base}/{spreadsheet_id}",
+    def spreadsheets_get(self, spreadsheet_id, include_grid_data=False):
+        """Spreadsheet metadata; with ``include_grid_data`` also every cell's value
+        and formatting, which on a real sheet is a lot of JSON."""
+        params = {"includeGridData": "true"} if include_grid_data else {
+            "fields": "spreadsheetId,properties.title,sheets.properties"}
+        r = self._http.get(f"{self._base}/{spreadsheet_id}", headers=self._hdr(), params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def batch_update(self, spreadsheet_id, requests):
+        """Apply a list of Sheets API ``Request`` objects — everything structural or
+        visual (sheets, formatting, merges, filters, charts) goes through here."""
+        r = self._http.post(
+            f"{self._base}/{spreadsheet_id}:batchUpdate",
             headers=self._hdr(),
-            params={"fields": "properties.title,sheets.properties"},
+            json={"requests": requests},
         )
         r.raise_for_status()
-        d = r.json()
-        tabs = []
-        for s in d.get("sheets", []):
-            p = s.get("properties", {})
-            gp = p.get("gridProperties", {})
-            tabs.append({
-                "title": p.get("title"),
-                "sheet_id": p.get("sheetId", 0),
-                "index": p.get("index", 0),
-                "row_count": gp.get("rowCount", 0),
-                "col_count": gp.get("columnCount", 0),
-            })
-        return {"title": d.get("properties", {}).get("title"), "tabs": tabs}
+        return r.json()
 
     # ── Drive: who owns what ────────────────────────────────────────
     def list_spreadsheets(self, owner_email, page_size=100):

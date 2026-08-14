@@ -2,8 +2,29 @@
 
 An MCP server that reads and writes Google Sheets, packaged as a Docker image.
 
-Six tools: `list_spreadsheets`, `read_range`, `write_range`, `append_rows`,
-`clear_range`, `list_sheets`.
+## Tools
+
+Six of them copy Google's own [Sheets MCP
+server](https://developers.google.com/workspace/sheets/api/reference/mcp) — same
+names, same argument names, same response shapes — so a call composed for that
+server works here unchanged:
+
+| Tool | |
+|---|---|
+| `get_values(spreadsheetId, range)` | read a range |
+| `get_spreadsheet(spreadsheetId, includeGridData=false)` | title, sheets, grid properties; optionally every cell |
+| `update_values(spreadsheetId, range, values)` | write values literally (`=A1+1` stays text) |
+| `update_formulas(spreadsheetId, range, formulas)` | write parsed input — formulas and dates |
+| `update_spreadsheet(spreadsheetId, requests)` | `batchUpdate`: sheets, formatting, merges, filters, charts |
+| `insert_dimension(spreadsheetId, sheetId, dimension, startIndex, endIndex, inheritFromBefore=false)` | insert rows or columns |
+
+Three more have no counterpart there:
+
+| Tool | |
+|---|---|
+| `list_spreadsheets()` | your spreadsheets shared with this server — the only way to find a `spreadsheetId` |
+| `append_values(spreadsheetId, range, values)` | append rows after the last row of data |
+| `clear_values(spreadsheetId, range)` | clear values, keep formatting |
 
 ## How access works
 
