@@ -63,26 +63,40 @@ Every push to `main` builds the image and publishes it to
 first and a failure blocks the publish). The server never checks out the source — it
 pulls that image.
 
-The VPS needs four files in one directory, two of them secret:
+The VPS needs three files in one directory, two of them secret:
 
 | | |
 |---|---|
 | `docker-compose.yml` | from this repo, unchanged |
-| `Caddyfile` | from this repo, unchanged |
 | `.env` | filled in from `.env.example` — **secret** |
 | `service-account.json` | the downloaded key — **secret** |
 
-With `sheets-mcp.treant.dev` pointing at the host (A record, Cloudflare set to DNS
-only) and ports 80 and 443 open:
+The container listens on `127.0.0.1:8000` only. TLS and the public entrance are the
+host's Caddy, which already serves the other sites on that box — add one site block
+to `/etc/caddy/Caddyfile`:
+
+```
+sheets-mcp.treant.dev {
+	reverse_proxy localhost:8000
+}
+```
+
+Then, with `sheets-mcp.treant.dev` pointing at the host (A record, Cloudflare set to
+DNS only):
 
 ```bash
 mkdir -p /opt/sheets-mcp && cd /opt/sheets-mcp
-# copy the four files here, then:
+# copy the three files here, then:
 docker compose up -d
+systemctl reload caddy
 curl https://sheets-mcp.treant.dev/health
 ```
 
-If the package is private, log in once first:
+Caddy obtains the certificate on the first request to the new name;
+`journalctl -u caddy -n 50` shows it happening. HTTPS is not optional — claude.ai
+rejects plain-http connectors.
+
+If the image package is private, log in once first:
 `echo $GITHUB_TOKEN | docker login ghcr.io -u <user> --password-stdin`.
 
 To ship a new version, push to `main`, then on the server:
@@ -90,9 +104,6 @@ To ship a new version, push to `main`, then on the server:
 ```bash
 docker compose pull && docker compose up -d
 ```
-
-Caddy obtains the TLS certificate on first start; `docker compose logs caddy` shows
-it happening. HTTPS is not optional — claude.ai rejects plain-http connectors.
 
 ## Connect
 
