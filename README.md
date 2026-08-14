@@ -87,10 +87,16 @@ DNS only):
 ```bash
 mkdir -p /opt/sheets-mcp && cd /opt/sheets-mcp
 # copy the three files here, then:
+chown 1000:1000 service-account.json && chmod 400 service-account.json
 docker compose up -d
 systemctl reload caddy
 curl https://sheets-mcp.treant.dev/health
 ```
+
+The container runs as uid 1000, so the key has to belong to that uid — a
+root-owned `chmod 600` key mounts fine but every tool call then fails with
+`[Errno 13] Permission denied: '/secrets/service-account.json'`. The health check
+still passes, because credentials are only loaded on the first tool call.
 
 Caddy obtains the certificate on the first request to the new name;
 `journalctl -u caddy -n 50` shows it happening. HTTPS is not optional — claude.ai
